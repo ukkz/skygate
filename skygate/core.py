@@ -32,10 +32,6 @@ class AsyncRequest(object):
         self.onDict[event] = callback
 
 
-
-
-
-
 class Data(AsyncRequest):
     def __init__(self, redirect_port, data_connection_id=None):
         super().__init__()
@@ -58,6 +54,12 @@ class Data(AsyncRequest):
             if self.connection_id is None:
                 # As "Data Connect"
                 # WIP.
+                res = requests.post(
+                    self.base_url + '/data/connections',
+                    json.dumps({
+                        }),
+                    headers={'Content-Type': 'application/json'}
+                    )
                 pass
             else:
                 # As "Data Answer"
@@ -135,8 +137,110 @@ class Data(AsyncRequest):
         udp.close()
 
 
+class Media(AsyncRequest):
+    def __init__(self, redirect_port, media_connection_id=None):
+        super().__init__()
+        self.connection_id = media_connection_id
+        self.redirect_addr = self.gateway_addr
+        self.redirect_port = redirect_port
+        self._isHandledIncomingMedia = False
+        self._isHandledOutgoingMedia = False
 
+        res = requests.post(
+            self.base_url + '/media',
+            json.dumps({'is_video': True}),
+            headers={'Content-Type': 'application/json'}
+            )
+        if res.status_code == 201:
+            body_data = res.json()
+            self.id = body_data['media_id']
+            self.ipv4_addr = body_data['ip_v4']
+            self.port = body_data['port']
+            if self.connection_id is None:
+                # As "Media Connect"
+                # WIP.
+                res = requests.post(
+                    self.base_url + '/media/connections',
+                    json.dumps({
+                        }),
+                    headers={'Content-Type': 'application/json'}
+                    )
+                pass
+            else:
+                # As "Media Answer"
+                self.async_get(self.base_url + '/media/connections/' + self.connection_id + '/events')
+        else:
+            raise Exception('Gateway returns code '+str(res.status_code)+' on opening media port')
 
+    def close(self):
+        # Close async get thread (at super class)
+        super().close()
+        # Close udp listener thread (on here)
+        self.thread_run_media = False
+        # Free data_connection_id
+        if self.connection_id is not None:
+            res = requests.delete(self.base_url + '/media/connections/' + self.connection_id)
+            if res.status_code != 204:
+                raise Exception('Gateway returns code '+str(res.status_code)+' on closing media connection')
+        # Free media_id
+        if self.id is not None:
+            res = requests.delete(self.base_url + '/media/' + self.id)
+            if res.status_code != 204 and res.status_code != 404: # 404 is disconnection from another peer
+                raise Exception('Gateway returns code '+str(res.status_code)+' on closing media port')
+
+    def getStatus(self):
+        res = requests.get(self.base_url + '/media/connections/' + self.connection_id + '/status')
+        j = res.json()
+        if res.status_code == 200 and j.get('open') is True:
+            return True
+        else:
+            return False
+
+    def isRedirectedIncoming(self):
+        return self._isHandledIncomingMedia
+
+    def isRedirectedOutgoing(self):
+        return self._isHandledOutgoingMedia
+
+    def getSourceToSend(self, redirect_ipv4_to_get_incoming=None, redirect_port_to_get_incoming=None):
+        constraints =   {
+            'video': True,
+            'videoReceiveEnabled': False,
+            'video_params': {
+                'band_width': 1500,
+                'codec': 'VP8',
+                'media_id': self.id,
+                'payload_type': 96
+                },
+            'audio': False,
+            'audioReceiveEnabled': False
+            }
+        if redirect_ipv4_to_get_incoming is None or redirect_port_to_get_incoming is None:
+            self._isHandledIncomingMedia = False
+            redirection = {}
+        else:
+            self._isHandledIncomingMedia = True
+            redirection = {
+                'video': {
+                    'ip_v4': redirect_ipv4_to_get_incoming,
+                    'port': redirect_port_to_get_incoming
+                    }
+                }
+        res = requests.post(
+            self.base_url + '/media/connections/' + self.connection_id + '/answer',
+            json.dumps({
+                'constraints': constraints,
+                'redirect_params': redirection
+                }),
+            headers={'Content-Type': 'application/json'}
+            )
+        if res.status_code == 202:
+            # Accepted
+            self._isHandledOutgoingMedia = True
+            return self.id, self.ipv4_addr, self.port
+        else:
+            self._isHandledOutgoingMedia = False
+            return False, False, False
 
 
 class Peer(AsyncRequest):
@@ -145,9 +249,10 @@ class Peer(AsyncRequest):
         self.id = peer_id
         self.token = None
         self.dataInstances = []
+        self.mediaInstances = []
 
         # Connect to SkyWay server
-        params = {'key': api_key, 'domain': 'localhost', 'turn':turn, 'peer_id': self.id}
+        params = {'key': api_key, 'domain': 'localhost', 'turn': turn, 'peer_id': self.id}
         res = requests.post(
             self.base_url + '/peers',
             json.dumps(params),
@@ -161,6 +266,7 @@ class Peer(AsyncRequest):
                 {'token': self.token}
                 )
             self.on('connection', self._createDataInstance) # fire when receive data connection
+            self.on('call', self._createMediaInstance) # fire when receive media connection
         else:
             raise Exception('Gateway returns code '+str(res.status_code)+' on creating peer')
 
@@ -170,6 +276,9 @@ class Peer(AsyncRequest):
         # Free data instances
         for data in self.dataInstances:
             data.close()
+        # Free media instances
+        for media in self.mediaInstances:
+            media.close()
         # Free peer_id
         if self.token is not None:
             res = requests.delete(
@@ -179,19 +288,31 @@ class Peer(AsyncRequest):
             if res.status_code != 204:
                 raise Exception('Gateway returns code '+str(res.status_code)+' on closing peer')
 
-    def _createDataInstance(self, response):
-        # find an unused port
+    def _getFreePort(self):
         used_ports = []
         for data in self.dataInstances:
             used_ports.append(data.redirect_port)
+        for media in self.mediaInstances:
+            used_ports.append(media.redirect_port)
         while True:
             redirect_port = random.randint(32768, 60999)
-            if redirect_port not in used_ports:
+            if redirect_port not in self.used_ports:
                 break
+        return redirect_port
+
+    def _createDataInstance(self, response):
+        redirect_port = self._getFreePort()
         # get connection_id from incoming packet and generate data instance
         data_connection_id = response['data_params']['data_connection_id']
         data = Data(redirect_port, data_connection_id)
         self.dataInstances.append(data)
+
+    def _createMediaInstance(self, response):
+        redirect_port = self._getFreePort()
+        # get connection_id from incoming packet and generate media instance
+        media_connection_id = response['call_params']['media_connection_id']
+        media = Media(redirect_port, media_connection_id)
+        self.mediaInstances.append(media)
 
     def getDataConnections(self, check_alive=False):
         # check connection
@@ -205,3 +326,16 @@ class Peer(AsyncRequest):
                         print(e)
                 time.sleep(0.1)
         return self.dataInstances
+
+    def getMediaConnections(self, check_alive=False):
+        # check connection
+        if check_alive:
+            for i, data in enumerate(self.mediaInstances):
+                if not media.getStatus():
+                    dead = self.mediaInstances.pop(i)
+                    try:
+                        dead.close()
+                    except Exception as e:
+                        print(e)
+                time.sleep(0.1)
+        return self.mediaInstances
