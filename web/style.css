@@ -1,0 +1,59 @@
+/* normalize */
+body { margin: 0; }
+
+/* global styles */
+video {
+  background-color: #111;
+  width: 100%;
+}
+
+.heading {
+  text-align: center;
+  margin-bottom: 0;
+}
+
+.container {
+  margin-left: auto;
+  margin-right: auto;
+  width: 980px;
+}
+
+.p2p-block {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  justify-content: center;
+}
+
+.remote-stream {
+  width: 70%;
+}
+
+.local-stream {
+  width: 30%;
+}
+
+.chatbox {
+  height:20vh;
+  width: 30vw;
+  display: block;
+  grid-template-columns: 30% 1fr;
+  margin: 0 8px;
+}
+
+.messages {
+  width: 100%;
+  border: 2px solid black;
+  background-color: rgb(180, 180, 180);
+  min-height: 100px;
+  padding: 8px;
+  margin-top: 0;
+  max-height: 100%;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+
+input {
+  width: 70%;
+}
+
